@@ -4,7 +4,6 @@ import helmet from "@fastify/helmet";
 import cors from "@fastify/cors";
 import Redis from "ioredis";
 import { PrismaClient } from "@prisma/client";
-import { ethers } from "ethers";
 import { randomUUID } from "crypto";
 
 import type { AppConfig } from "./config";
@@ -13,13 +12,13 @@ import { createTurnstileVerifier } from "./services/turnstile";
 import { createFaucetSender } from "./services/faucet";
 import { createLimitsService } from "./services/limits";
 import { createAdminAuth } from "./services/admin";
+import { createCatalystRpcClient } from "./services/catalystRpc";
 
 export type AppDeps = {
   config: AppConfig;
   redis: Redis;
   prisma: PrismaClient;
-  provider: ethers.JsonRpcProvider;
-  wallet: ethers.Wallet;
+  rpc: ReturnType<typeof createCatalystRpcClient>;
 };
 
 export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
@@ -98,11 +97,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     datasources: { db: { url: config.databaseUrl } },
   });
 
-  const network = new ethers.Network("catalyst-testnet", config.chainId);
-  const provider = new ethers.JsonRpcProvider(config.rpcUrl, network, {
-    staticNetwork: network,
-  });
-  const wallet = new ethers.Wallet(config.faucetPrivateKey, provider);
+  const rpc = createCatalystRpcClient(config.rpcUrl);
 
   const verifyTurnstile = createTurnstileVerifier(config.turnstileSecretKey);
   const limits = createLimitsService(redis, {
@@ -110,10 +105,16 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     globalRpm: config.globalRpm,
     ipHashSalt: config.ipHashSalt,
   });
-  const faucet = createFaucetSender({ provider, wallet, amountWei: config.faucetAmountWei });
+  const faucet = createFaucetSender({
+    rpcUrl: config.rpcUrl,
+    chainId: config.chainId,
+    genesisHash: config.genesisHash,
+    faucetPrivateKeyHex: config.faucetPrivateKeyHex,
+    amountUnits: config.faucetAmountUnits,
+  });
   const adminAuth = createAdminAuth(config.adminToken);
 
-  app.decorate("deps", { config, redis, prisma, provider, wallet } satisfies AppDeps);
+  app.decorate("deps", { config, redis, prisma, rpc } satisfies AppDeps);
 
   app.addHook("onClose", async () => {
     await Promise.allSettled([redis.quit(), prisma.$disconnect()]);
@@ -121,61 +122,19 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
 
   app.get("/health", async (req, reply) => {
     const start = Date.now();
-    async function fetchRpcChainId(): Promise<number | null> {
-      // Prefer eth_chainId, but fall back to net_version for nodes that don't implement it.
-      try {
-        const res = await provider.send("eth_chainId", []);
-        if (typeof res === "string" && res.toLowerCase().startsWith("0x")) {
-          const n = Number.parseInt(res.slice(2), 16);
-          if (Number.isFinite(n)) return n;
-        }
-      } catch {
-        // fall through
-      }
-      try {
-        const res = await provider.send("net_version", []);
-        const s = typeof res === "string" ? res : typeof res === "number" ? String(res) : "";
-        const n = Number.parseInt(s, 10);
-        if (Number.isFinite(n)) return n;
-      } catch {
-        // fall through
-      }
-      return null;
-    }
-
-    async function fetchGenesisHash(): Promise<string | null> {
-      if (!config.genesisHash) return null;
-      try {
-        const res = await provider.send("eth_getBlockByNumber", ["0x0", false]);
-        const hash = res && typeof res === "object" ? (res as any).hash : null;
-        return typeof hash === "string" && hash.toLowerCase().startsWith("0x") ? hash.toLowerCase() : null;
-      } catch {
-        return null;
-      }
-    }
-
-    const [redisOk, dbOk, rpcBlockOk, rpcChainOk, rpcGenesisOk] = await Promise.allSettled([
+    const [redisOk, dbOk, rpcInfoOk, rpcBlockOk] = await Promise.allSettled([
       redis.ping(),
       prisma.$queryRaw`SELECT 1`,
-      provider.getBlockNumber(),
-      fetchRpcChainId(),
-      fetchGenesisHash(),
+      rpc.getSyncInfo(),
+      rpc.blockNumber(),
     ]);
 
-    let rpcNetworkVerified = false;
-    let rpcNetworkMatches: boolean | null = null;
-
-    if (rpcChainOk.status === "fulfilled" && rpcChainOk.value != null) {
-      rpcNetworkVerified = true;
-      rpcNetworkMatches = rpcChainOk.value === config.chainId;
-    } else if (config.genesisHash && rpcGenesisOk.status === "fulfilled" && rpcGenesisOk.value) {
-      rpcNetworkVerified = true;
-      rpcNetworkMatches = rpcGenesisOk.value === config.genesisHash;
-    }
-
-    // If we can't verify the network identity (some nodes omit chain id methods),
-    // still report RPC as OK if it's reachable. Use GENESIS_HASH to enforce verification.
-    const rpcOk = rpcBlockOk.status === "fulfilled" && (rpcNetworkMatches !== false);
+    const rpcNetworkMatches =
+      rpcInfoOk.status === "fulfilled"
+        ? rpcInfoOk.value.chain_id.trim().toLowerCase() === `0x${config.chainId.toString(16)}` &&
+          rpcInfoOk.value.genesis_hash.trim().toLowerCase() === config.genesisHash.toLowerCase()
+        : false;
+    const rpcOk = rpcBlockOk.status === "fulfilled" && rpcNetworkMatches;
     const ok = redisOk.status === "fulfilled" && dbOk.status === "fulfilled" && rpcOk;
 
     return reply.code(ok ? 200 : 503).send({
@@ -184,8 +143,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       redis: redisOk.status === "fulfilled",
       db: dbOk.status === "fulfilled",
       rpc: rpcOk,
-      rpcNetworkMatches: rpcNetworkMatches ?? true,
-      rpcNetworkVerified,
+      rpcNetworkMatches,
       requestId: req.id,
     });
   });
@@ -291,7 +249,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
         data: {
           address: normalized,
           ipHash,
-          amountWei: config.faucetAmountWei,
+          amountWei: config.faucetAmountUnits,
           txHash,
           country,
           asn,

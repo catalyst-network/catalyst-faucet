@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { ethers } from "ethers";
+function isHex32(s: string): boolean {
+  return /^0x[0-9a-f]{64}$/.test(s);
+}
 
 const ALLOWED_CHAIN_IDS = new Set<number>([0xbf8457c]);
 
@@ -21,9 +23,8 @@ const envSchema = z.object({
   TURNSTILE_SECRET_KEY: z.string().min(1),
   ADMIN_TOKEN: z.string().min(1),
   IP_HASH_SALT: z.string().min(16),
-  // Optional: provide the expected genesis block hash (block 0) to verify the RPC
-  // is pointing at the intended network when eth_chainId/net_version are unavailable.
-  GENESIS_HASH: z.string().optional(),
+  // Required for Catalyst v1 signing domain separation.
+  GENESIS_HASH: z.string().min(1),
 
   // Default to 8080 so the web UI can run on Next.js' default 3000 locally.
   PORT: z.coerce.number().int().positive().default(8080),
@@ -36,9 +37,9 @@ const envSchema = z.object({
 export type AppConfig = Readonly<{
   rpcUrl: string;
   chainId: number;
-  faucetPrivateKey: string;
+  faucetPrivateKeyHex: string;
   faucetAmount: string;
-  faucetAmountWei: bigint;
+  faucetAmountUnits: bigint;
   cooldownHours: number;
   cooldownMs: number;
   redisUrl: string;
@@ -46,7 +47,7 @@ export type AppConfig = Readonly<{
   turnstileSecretKey: string;
   adminToken: string;
   ipHashSalt: string;
-  genesisHash: string | null;
+  genesisHash: string;
   explorerBaseUrl: string;
   explorerTxTemplate: string;
   port: number;
@@ -66,11 +67,16 @@ export function loadConfig(processEnv: NodeJS.ProcessEnv = process.env): AppConf
     );
   }
 
-  let faucetAmountWei: bigint;
+  let faucetAmountUnits: bigint;
   try {
-    faucetAmountWei = ethers.parseEther(parsed.FAUCET_AMOUNT);
+    // Catalyst transfers use integer units (protocol atom). For public testnet faucet,
+    // configure whole-unit amounts (e.g. "1000").
+    faucetAmountUnits = BigInt(parsed.FAUCET_AMOUNT);
   } catch {
-    throw new Error(`Invalid FAUCET_AMOUNT (expected decimal tokens): ${parsed.FAUCET_AMOUNT}`);
+    throw new Error(`Invalid FAUCET_AMOUNT (expected integer units): ${parsed.FAUCET_AMOUNT}`);
+  }
+  if (faucetAmountUnits <= 0n) {
+    throw new Error(`Invalid FAUCET_AMOUNT (must be > 0): ${parsed.FAUCET_AMOUNT}`);
   }
 
   const cooldownMs = parsed.COOLDOWN_HOURS * 60 * 60 * 1000;
@@ -78,19 +84,22 @@ export function loadConfig(processEnv: NodeJS.ProcessEnv = process.env): AppConf
   const explorerBaseUrl = "https://explorer.catalystnet.org";
   const explorerTxTemplate = `${explorerBaseUrl}/tx/<txHash>`;
 
-  const genesisHashRaw = parsed.GENESIS_HASH?.trim();
-  const genesisHash =
-    genesisHashRaw && genesisHashRaw.length > 0 ? genesisHashRaw.toLowerCase() : null;
-  if (genesisHash && !/^0x[0-9a-f]{64}$/.test(genesisHash)) {
+  const genesisHash = parsed.GENESIS_HASH.trim().toLowerCase();
+  if (!isHex32(genesisHash)) {
     throw new Error(`Invalid GENESIS_HASH (expected 0x + 64 hex chars): ${parsed.GENESIS_HASH}`);
+  }
+
+  const faucetPrivateKeyHex = parsed.FAUCET_PRIVATE_KEY.trim().toLowerCase().replace(/^0x/, "");
+  if (!/^[0-9a-f]{64}$/.test(faucetPrivateKeyHex)) {
+    throw new Error("Invalid FAUCET_PRIVATE_KEY (expected 32-byte hex)");
   }
 
   return {
     rpcUrl: parsed.RPC_URL,
     chainId,
-    faucetPrivateKey: parsed.FAUCET_PRIVATE_KEY,
+    faucetPrivateKeyHex,
     faucetAmount: parsed.FAUCET_AMOUNT,
-    faucetAmountWei,
+    faucetAmountUnits,
     cooldownHours: parsed.COOLDOWN_HOURS,
     cooldownMs,
     redisUrl: parsed.REDIS_URL,
