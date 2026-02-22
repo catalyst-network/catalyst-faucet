@@ -1,5 +1,6 @@
 import type Redis from "ioredis";
 import { createHash, randomBytes } from "crypto";
+import { apiError } from "../errors";
 
 const PAUSED_KEY = "faucet:paused";
 
@@ -63,7 +64,17 @@ export function createLimitsService(
     const count = await redis.incr(key);
     if (count === 1) await redis.expire(key, 70);
     if (count > globalRpm) {
-      throw Object.assign(new Error("Rate limit exceeded"), { statusCode: 429 });
+      const now = Date.now();
+      const retryAfterSeconds = Math.max(1, Math.ceil((60_000 - (now % 60_000)) / 1000));
+      throw apiError({
+        statusCode: 429,
+        code: "COOLDOWN_ACTIVE",
+        message: "Cooldown active. Try again later.",
+        meta: {
+          retryAfterSeconds,
+          nextEligibleAtMs: now + retryAfterSeconds * 1000,
+        },
+      });
     }
   }
 
@@ -125,7 +136,16 @@ export function createLimitsService(
       const ok = await redis.set(key, token, "PX", lockMs, "NX");
       if (ok !== "OK") {
         await Promise.allSettled(acquired.map((k) => redis.eval(RELEASE_LOCK_LUA, 1, k, token)));
-        throw Object.assign(new Error("Claim already in progress"), { statusCode: 429 });
+        const now = Date.now();
+        throw apiError({
+          statusCode: 429,
+          code: "COOLDOWN_ACTIVE",
+          message: "Cooldown active. Try again later.",
+          meta: {
+            retryAfterSeconds: 5,
+            nextEligibleAtMs: now + 5_000,
+          },
+        });
       }
       acquired.push(key);
     }

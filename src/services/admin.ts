@@ -1,4 +1,5 @@
 import type { FastifyRequest } from "fastify";
+import { apiError } from "../errors";
 
 function extractAdminToken(req: FastifyRequest): string | undefined {
   const h = req.headers;
@@ -16,9 +17,7 @@ export function createAdminAuth(adminToken: string) {
     assertAdmin(req: FastifyRequest) {
       const token = extractAdminToken(req);
       if (!token || token !== adminToken) {
-        const err = new Error("Unauthorized");
-        (err as any).statusCode = 401;
-        throw err;
+        throw apiError({ statusCode: 401, code: "UNAUTHORIZED", message: "Unauthorized" });
       }
     },
   };

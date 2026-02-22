@@ -1,4 +1,5 @@
 import { ethers } from "ethers";
+import { apiError } from "../errors";
 
 export function createFaucetSender(opts: {
   provider: ethers.JsonRpcProvider;
@@ -10,9 +11,11 @@ export function createFaucetSender(opts: {
       try {
         return ethers.getAddress(input);
       } catch {
-        const err = new Error("Invalid address");
-        (err as any).statusCode = 400;
-        throw err;
+        throw apiError({
+          statusCode: 400,
+          code: "INVALID_ADDRESS",
+          message: "Invalid address",
+        });
       }
     },
 

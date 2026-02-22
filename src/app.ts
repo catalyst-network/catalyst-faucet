@@ -8,6 +8,7 @@ import { ethers } from "ethers";
 import { randomUUID } from "crypto";
 
 import type { AppConfig } from "./config";
+import { ApiError, apiError } from "./errors";
 import { createTurnstileVerifier } from "./services/turnstile";
 import { createFaucetSender } from "./services/faucet";
 import { createLimitsService } from "./services/limits";
@@ -40,6 +41,52 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("x-request-id", req.id);
+  });
+
+  app.setErrorHandler(async (err, req, reply) => {
+    const statusCode = (err as any).statusCode && Number.isFinite((err as any).statusCode) ? (err as any).statusCode : 500;
+
+    if (err instanceof ApiError) {
+      if (err.statusCode === 429 && err.code === "COOLDOWN_ACTIVE") {
+        const now = Date.now();
+        const nextEligibleAtMs =
+          typeof err.meta?.nextEligibleAtMs === "number" ? (err.meta.nextEligibleAtMs as number) : now + 60_000;
+        const retryAfterSeconds =
+          typeof err.meta?.retryAfterSeconds === "number"
+            ? (err.meta.retryAfterSeconds as number)
+            : Math.max(1, Math.ceil((nextEligibleAtMs - now) / 1000));
+
+        reply.header("retry-after", String(retryAfterSeconds));
+        return reply.code(429).send({
+          error: {
+            code: err.code,
+            message: err.message,
+            ...(err.details ? { details: err.details } : {}),
+          },
+          nextEligibleAt: new Date(nextEligibleAtMs).toISOString(),
+          retryAfterSeconds,
+        });
+      }
+
+      return reply.code(err.statusCode).send({
+        error: {
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {}),
+        },
+      });
+    }
+
+    if ((err as any).validation) {
+      return reply.code(400).send({
+        error: { code: "INVALID_REQUEST", message: "Invalid address/body" },
+      });
+    }
+
+    req.log.error({ err }, "Unhandled error");
+    return reply.code(statusCode).send({
+      error: { code: "INTERNAL_ERROR", message: "Internal server error" },
+    });
   });
 
   const redis = new Redis(config.redisUrl, {
@@ -96,53 +143,47 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
   });
 
   app.get("/v1/info", async () => {
-    const balanceWei = await provider.getBalance(wallet.address);
     return {
-      chainId: config.chainId,
-      faucetAddress: wallet.address,
+      networkName: "Catalyst Testnet",
+      chainId: `0x${config.chainId.toString(16)}`,
+      symbol: "KAT",
       amount: config.faucetAmount,
-      cooldownHours: config.cooldownHours,
-      balanceWei: balanceWei.toString(),
-      balance: ethers.formatEther(balanceWei),
-      explorerTxTemplate: config.explorerTxTemplate,
-      paused: await limits.isPaused(),
+      cooldownSeconds: Math.floor(config.cooldownMs / 1000),
     };
   });
 
-  app.post("/v1/claim", async (req, reply) => {
-    const body = req.body as unknown;
-    if (!body || typeof body !== "object") throw app.httpErrors.badRequest("Invalid JSON body");
-    const { address, captchaToken } = body as { address?: unknown; captchaToken?: unknown };
-    if (typeof address !== "string" || typeof captchaToken !== "string") {
-      throw app.httpErrors.badRequest("Body must include { address: string, captchaToken: string }");
+  async function performRequest(params: { address: string; turnstileToken: string; ip: string; headers: Record<string, unknown> }) {
+    if (await limits.isPaused()) {
+      throw apiError({
+        statusCode: 503,
+        code: "UPSTREAM_UNAVAILABLE",
+        message: "Faucet is temporarily unavailable",
+        details: { hint: "try again later" },
+      });
     }
 
-    if (await limits.isPaused()) throw app.httpErrors.serviceUnavailable("Faucet is paused");
+    const normalized = faucet.normalizeAddress(params.address);
 
-    const normalized = faucet.normalizeAddress(address);
-
-    // Global request rate limit (per minute)
     await limits.checkGlobalLimitOrThrow();
 
-    const countryRaw = (req.headers["cf-ipcountry"] as string | undefined)?.trim();
-    const asnRaw = (req.headers["cf-asn"] as string | undefined)?.trim();
+    const countryRaw = (params.headers["cf-ipcountry"] as string | undefined)?.trim();
+    const asnRaw = (params.headers["cf-asn"] as string | undefined)?.trim();
 
     const country = config.enableCountryLimit && countryRaw ? countryRaw.toUpperCase() : null;
     const asn = config.enableAsnLimit && asnRaw ? Number.parseInt(asnRaw, 10) : null;
 
     if (config.enableCountryLimit && (!country || !/^[A-Z]{2}$/.test(country))) {
-      throw app.httpErrors.badRequest("Missing/invalid cf-ipcountry header");
+      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
     }
     if (config.enableAsnLimit && (!Number.isFinite(asn) || (asn as number) <= 0)) {
-      throw app.httpErrors.badRequest("Missing/invalid cf-asn header");
+      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
     }
 
-    const clientIp = req.ip;
-    const ipHash = limits.hashIp(clientIp);
+    const ipHash = limits.hashIp(params.ip);
 
     await verifyTurnstile({
-      token: captchaToken,
-      ip: clientIp,
+      token: params.turnstileToken,
+      ip: params.ip,
       idempotencyKey: `${normalized}:${ipHash}`,
     });
 
@@ -150,13 +191,16 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     try {
       const cooldown = await limits.getCooldown({ address: normalized, ipHash, asn, country });
       if (!cooldown.eligible) {
-        return reply.code(429).send({
-          error: "cooldown",
-          nextEligibleAtMs: cooldown.nextEligibleAtMs,
+        const now = Date.now();
+        const retryAfterSeconds = Math.max(1, Math.ceil((cooldown.nextEligibleAtMs - now) / 1000));
+        throw apiError({
+          statusCode: 429,
+          code: "COOLDOWN_ACTIVE",
+          message: "Cooldown active. Try again later.",
+          meta: { nextEligibleAtMs: cooldown.nextEligibleAtMs, retryAfterSeconds },
         });
       }
 
-      // DB fallback: protects against Redis restarts / key loss
       const now = Date.now();
       const since = new Date(now - config.cooldownMs);
       const or: Array<Record<string, unknown>> = [{ address: normalized }, { ipHash }];
@@ -170,13 +214,27 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
         orderBy: { createdAt: "desc" },
       });
       if (recent) {
-        return reply.code(429).send({
-          error: "cooldown",
-          nextEligibleAtMs: recent.createdAt.getTime() + config.cooldownMs,
+        const nextEligibleAtMs = recent.createdAt.getTime() + config.cooldownMs;
+        const retryAfterSeconds = Math.max(1, Math.ceil((nextEligibleAtMs - now) / 1000));
+        throw apiError({
+          statusCode: 429,
+          code: "COOLDOWN_ACTIVE",
+          message: "Cooldown active. Try again later.",
+          meta: { nextEligibleAtMs, retryAfterSeconds },
         });
       }
 
-      const txHash = await faucet.sendTo(normalized);
+      let txHash: string;
+      try {
+        txHash = await faucet.sendTo(normalized);
+      } catch {
+        throw apiError({
+          statusCode: 503,
+          code: "UPSTREAM_UNAVAILABLE",
+          message: "Faucet is temporarily unavailable",
+          details: { hint: "try again later" },
+        });
+      }
 
       const sentAt = Date.now();
       const nextEligibleAtMs = sentAt + config.cooldownMs;
@@ -189,22 +247,62 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
           txHash,
           country,
           asn,
-          userAgent: (req.headers["user-agent"] as string | undefined) ?? null,
+          userAgent: (params.headers["user-agent"] as string | undefined) ?? null,
         },
       });
 
       await limits.startCooldown({ address: normalized, ipHash, asn, country, nowMs: sentAt });
 
-      return {
-        txHash,
-        amount: config.faucetAmount,
-        address: normalized,
-        nextEligibleAtMs,
-        txUrl: `${config.explorerBaseUrl}/tx/${txHash}`,
-      };
+      return { txHash, nextEligibleAtMs };
     } finally {
       await lock.release();
     }
+  }
+
+  app.post("/v1/request", async (req) => {
+    const body = req.body as unknown;
+    if (!body || typeof body !== "object") {
+      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+    }
+    const { address, turnstileToken } = body as { address?: unknown; turnstileToken?: unknown };
+    if (typeof address !== "string" || typeof turnstileToken !== "string") {
+      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+    }
+
+    const res = await performRequest({
+      address,
+      turnstileToken,
+      ip: req.ip,
+      headers: req.headers as unknown as Record<string, unknown>,
+    });
+
+    return { txHash: res.txHash, nextEligibleAt: new Date(res.nextEligibleAtMs).toISOString() };
+  });
+
+  // Backwards-compatible alias (accepts either captchaToken or turnstileToken)
+  app.post("/v1/claim", async (req) => {
+    const body = req.body as unknown;
+    if (!body || typeof body !== "object") {
+      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+    }
+    const { address, captchaToken, turnstileToken } = body as {
+      address?: unknown;
+      captchaToken?: unknown;
+      turnstileToken?: unknown;
+    };
+    const token = (typeof turnstileToken === "string" && turnstileToken) || (typeof captchaToken === "string" && captchaToken);
+    if (typeof address !== "string" || typeof token !== "string") {
+      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+    }
+
+    const res = await performRequest({
+      address,
+      turnstileToken: token,
+      ip: req.ip,
+      headers: req.headers as unknown as Record<string, unknown>,
+    });
+
+    return { txHash: res.txHash, nextEligibleAt: new Date(res.nextEligibleAtMs).toISOString() };
   });
 
   app.get("/v1/admin/claims", async (req) => {

@@ -1,3 +1,5 @@
+import { apiError } from "../errors";
+
 type TurnstileVerifyParams = {
   token: string;
   ip?: string;
@@ -30,18 +32,22 @@ export function createTurnstileVerifier(secretKey: string) {
     });
 
     if (!res.ok) {
-      const err = new Error(`Turnstile verify failed (http ${res.status})`);
-      (err as any).statusCode = 502;
-      throw err;
+      throw apiError({
+        statusCode: 503,
+        code: "UPSTREAM_UNAVAILABLE",
+        message: "Faucet is temporarily unavailable",
+        details: { hint: "try again later" },
+      });
     }
 
     const data = (await res.json()) as TurnstileResponse;
     if (!data.success) {
-      const err = new Error(
-        `Invalid captcha${data["error-codes"]?.length ? `: ${data["error-codes"].join(",")}` : ""}`,
-      );
-      (err as any).statusCode = 400;
-      throw err;
+      throw apiError({
+        statusCode: 403,
+        code: "TURNSTILE_FAILED",
+        message: "Verification failed",
+        details: data["error-codes"]?.length ? { errorCodes: data["error-codes"] } : undefined,
+      });
     }
   };
 }

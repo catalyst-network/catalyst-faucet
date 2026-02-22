@@ -24,30 +24,30 @@ Checks **RPC + Redis + DB** health.
 
 ### `GET /v1/info`
 
-Returns faucet settings and balance.
+Returns faucet settings for the UI.
 
-Example response fields:
+```json
+{
+  "networkName": "Catalyst Testnet",
+  "chainId": "0xbf8457c",
+  "symbol": "KAT",
+  "amount": "0.1",
+  "cooldownSeconds": 86400
+}
+```
 
-- `chainId`
-- `faucetAddress`
-- `amount`
-- `cooldownHours`
-- `balance` / `balanceWei`
-- `explorerTxTemplate`
-- `paused`
-
-### `POST /v1/claim`
+### `POST /v1/request`
 
 Body:
 
 ```json
-{ "address": "0x...", "captchaToken": "..." }
+{ "address": "0x...", "turnstileToken": "token-from-turnstile" }
 ```
 
 Returns:
 
 ```json
-{ "txHash": "0x...", "amount": "0.1", "address": "0x...", "nextEligibleAtMs": 0 }
+{ "txHash": "0x...", "nextEligibleAt": "2026-02-23T14:06:22.806Z" }
 ```
 
 Notes:
@@ -56,6 +56,10 @@ Notes:
 - Enforces **global requests/min** (`GLOBAL_RPM`, default 60).
 - When `ENABLE_COUNTRY_LIMIT=true`, also enforces cooldown per country (requires `cf-ipcountry` header).
 - When `ENABLE_ASN_LIMIT=true`, also enforces cooldown per ASN (requires `cf-asn` header).
+
+### `POST /v1/claim` (compatibility alias)
+
+Accepts either `{ address, captchaToken }` or `{ address, turnstileToken }` and returns the same response shape as `/v1/request`.
 
 ### Admin
 
