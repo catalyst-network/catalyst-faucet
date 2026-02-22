@@ -2,6 +2,7 @@
 set -eu
 
 echo "Running Prisma migrations..."
+npm run prisma:generate
 npm run prisma:migrate:deploy
 
 echo "Starting faucet..."

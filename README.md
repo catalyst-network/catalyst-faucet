@@ -103,7 +103,7 @@ Required:
 
 Optional:
 
-- **`PORT`** (default 3000)
+- **`PORT`** (default 8080)
 - **`HOST`** (default `0.0.0.0`)
 - **`GLOBAL_RPM`** (default 60)
 - **`ENABLE_COUNTRY_LIMIT`** (default `false`)

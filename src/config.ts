@@ -22,7 +22,8 @@ const envSchema = z.object({
   ADMIN_TOKEN: z.string().min(1),
   IP_HASH_SALT: z.string().min(16),
 
-  PORT: z.coerce.number().int().positive().default(3000),
+  // Default to 8080 so the web UI can run on Next.js' default 3000 locally.
+  PORT: z.coerce.number().int().positive().default(8080),
   HOST: z.string().default("0.0.0.0"),
   GLOBAL_RPM: z.coerce.number().int().positive().default(60),
   ENABLE_COUNTRY_LIMIT: z.coerce.boolean().default(false),
