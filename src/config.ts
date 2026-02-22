@@ -21,6 +21,9 @@ const envSchema = z.object({
   TURNSTILE_SECRET_KEY: z.string().min(1),
   ADMIN_TOKEN: z.string().min(1),
   IP_HASH_SALT: z.string().min(16),
+  // Optional: provide the expected genesis block hash (block 0) to verify the RPC
+  // is pointing at the intended network when eth_chainId/net_version are unavailable.
+  GENESIS_HASH: z.string().optional(),
 
   // Default to 8080 so the web UI can run on Next.js' default 3000 locally.
   PORT: z.coerce.number().int().positive().default(8080),
@@ -43,6 +46,7 @@ export type AppConfig = Readonly<{
   turnstileSecretKey: string;
   adminToken: string;
   ipHashSalt: string;
+  genesisHash: string | null;
   explorerBaseUrl: string;
   explorerTxTemplate: string;
   port: number;
@@ -74,6 +78,13 @@ export function loadConfig(processEnv: NodeJS.ProcessEnv = process.env): AppConf
   const explorerBaseUrl = "https://explorer.catalystnet.org";
   const explorerTxTemplate = `${explorerBaseUrl}/tx/<txHash>`;
 
+  const genesisHashRaw = parsed.GENESIS_HASH?.trim();
+  const genesisHash =
+    genesisHashRaw && genesisHashRaw.length > 0 ? genesisHashRaw.toLowerCase() : null;
+  if (genesisHash && !/^0x[0-9a-f]{64}$/.test(genesisHash)) {
+    throw new Error(`Invalid GENESIS_HASH (expected 0x + 64 hex chars): ${parsed.GENESIS_HASH}`);
+  }
+
   return {
     rpcUrl: parsed.RPC_URL,
     chainId,
@@ -87,6 +98,7 @@ export function loadConfig(processEnv: NodeJS.ProcessEnv = process.env): AppConf
     turnstileSecretKey: parsed.TURNSTILE_SECRET_KEY,
     adminToken: parsed.ADMIN_TOKEN,
     ipHashSalt: parsed.IP_HASH_SALT,
+    genesisHash,
     explorerBaseUrl,
     explorerTxTemplate,
     port: parsed.PORT,

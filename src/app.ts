@@ -143,17 +143,39 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       return null;
     }
 
-    const [redisOk, dbOk, rpcBlockOk, rpcChainOk] = await Promise.allSettled([
+    async function fetchGenesisHash(): Promise<string | null> {
+      if (!config.genesisHash) return null;
+      try {
+        const res = await provider.send("eth_getBlockByNumber", ["0x0", false]);
+        const hash = res && typeof res === "object" ? (res as any).hash : null;
+        return typeof hash === "string" && hash.toLowerCase().startsWith("0x") ? hash.toLowerCase() : null;
+      } catch {
+        return null;
+      }
+    }
+
+    const [redisOk, dbOk, rpcBlockOk, rpcChainOk, rpcGenesisOk] = await Promise.allSettled([
       redis.ping(),
       prisma.$queryRaw`SELECT 1`,
       provider.getBlockNumber(),
       fetchRpcChainId(),
+      fetchGenesisHash(),
     ]);
 
-    const rpcNetworkMatches =
-      rpcChainOk.status === "fulfilled" ? (rpcChainOk.value ?? -1) === config.chainId : false;
+    let rpcNetworkVerified = false;
+    let rpcNetworkMatches: boolean | null = null;
 
-    const rpcOk = rpcBlockOk.status === "fulfilled" && rpcNetworkMatches;
+    if (rpcChainOk.status === "fulfilled" && rpcChainOk.value != null) {
+      rpcNetworkVerified = true;
+      rpcNetworkMatches = rpcChainOk.value === config.chainId;
+    } else if (config.genesisHash && rpcGenesisOk.status === "fulfilled" && rpcGenesisOk.value) {
+      rpcNetworkVerified = true;
+      rpcNetworkMatches = rpcGenesisOk.value === config.genesisHash;
+    }
+
+    // If we can't verify the network identity (some nodes omit chain id methods),
+    // still report RPC as OK if it's reachable. Use GENESIS_HASH to enforce verification.
+    const rpcOk = rpcBlockOk.status === "fulfilled" && (rpcNetworkMatches !== false);
     const ok = redisOk.status === "fulfilled" && dbOk.status === "fulfilled" && rpcOk;
 
     return reply.code(ok ? 200 : 503).send({
@@ -162,7 +184,8 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       redis: redisOk.status === "fulfilled",
       db: dbOk.status === "fulfilled",
       rpc: rpcOk,
-      rpcNetworkMatches,
+      rpcNetworkMatches: rpcNetworkMatches ?? true,
+      rpcNetworkVerified,
       requestId: req.id,
     });
   });
