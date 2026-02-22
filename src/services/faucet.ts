@@ -14,8 +14,13 @@ export function createFaucetSender(opts: {
   amountUnits: bigint;
 }) {
   const rpc = createCatalystRpcClient(opts.rpcUrl);
-  const faucetPubkey32 = derivePubkey32FromPrivateKeyHex(opts.faucetPrivateKeyHex);
-  const faucetAddress = (`0x${Buffer.from(faucetPubkey32).toString("hex")}`) as `0x${string}`;
+  let faucetPubkey32: Uint8Array | null = null;
+  let faucetAddress: `0x${string}` | null = null;
+  async function ensureFaucetIdentity() {
+    if (faucetPubkey32 && faucetAddress) return;
+    faucetPubkey32 = await derivePubkey32FromPrivateKeyHex(opts.faucetPrivateKeyHex);
+    faucetAddress = (`0x${Buffer.from(faucetPubkey32).toString("hex")}`) as `0x${string}`;
+  }
 
   return {
     normalizeAddress(input: string): string {
@@ -31,6 +36,9 @@ export function createFaucetSender(opts: {
     },
 
     async sendTo(to: string): Promise<string> {
+      await ensureFaucetIdentity();
+      const faucetAddr = faucetAddress as `0x${string}`;
+      const faucetPk = faucetPubkey32 as Uint8Array;
       const recipient = normalizeCatalystAddress(to);
       const [remoteChainId, remoteGenesisHash] = await Promise.all([
         rpc.chainId(),
@@ -56,20 +64,20 @@ export function createFaucetSender(opts: {
         });
       }
 
-      const committedNonce = await rpc.getNonce(faucetAddress);
+      const committedNonce = await rpc.getNonce(faucetAddr);
       const nonce = BigInt(committedNonce) + 1n;
 
       const feeStr = await rpc.estimateFee({
-        from: faucetAddress,
+        from: faucetAddr,
         to: recipient,
         value: opts.amountUnits.toString(),
         data: "",
       });
       const fees = BigInt(feeStr);
 
-      const { wireHex, txIdHex } = buildSignedTransferTxV1({
+      const { wireHex, txIdHex } = await buildSignedTransferTxV1({
         faucetPrivateKeyHex: opts.faucetPrivateKeyHex,
-        faucetPubkey32,
+        faucetPubkey32: faucetPk,
         to: recipient,
         amount: opts.amountUnits,
         nonce,

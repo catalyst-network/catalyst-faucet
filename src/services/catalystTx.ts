@@ -1,7 +1,26 @@
 import { randomBytes } from "crypto";
-import { blake2b } from "@noble/hashes/blake2.js";
-import { ristretto255 } from "@noble/curves/ed25519";
-import { mod } from "@noble/curves/abstract/modular.js";
+
+type Noble = {
+  blake2b: typeof import("@noble/hashes/blake2.js").blake2b;
+  ristretto255: typeof import("@noble/curves/ed25519.js").ristretto255;
+  mod: typeof import("@noble/curves/abstract/modular.js").mod;
+};
+
+let noblePromise: Promise<Noble> | null = null;
+async function noble(): Promise<Noble> {
+  if (!noblePromise) {
+    noblePromise = Promise.all([
+      import("@noble/hashes/blake2.js"),
+      import("@noble/curves/ed25519.js"),
+      import("@noble/curves/abstract/modular.js"),
+    ]).then(([h, c, m]) => ({
+      blake2b: h.blake2b,
+      ristretto255: c.ristretto255,
+      mod: m.mod,
+    }));
+  }
+  return noblePromise;
+}
 
 const TX_WIRE_MAGIC_V1 = new TextEncoder().encode("CTX1");
 const TX_SIG_DOMAIN_V1 = new TextEncoder().encode("CATALYST_SIG_V1");
@@ -41,8 +60,8 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 function blake2b256(data: Uint8Array): Uint8Array {
-  const full = blake2b(data, { dkLen: 64 });
-  return full.slice(0, 32);
+  // Only used from async code paths that loaded noble.
+  throw new Error("blake2b256 called before noble loaded");
 }
 
 function concatBytes(parts: Uint8Array[]): Uint8Array {
@@ -144,7 +163,10 @@ function serializeTx(tx: Tx): Uint8Array {
   ]);
 }
 
-export function derivePubkey32FromPrivateKeyHex(privateKeyHex: string): Uint8Array {
+export async function derivePubkey32FromPrivateKeyHex(
+  privateKeyHex: string,
+): Promise<Uint8Array> {
+  const { ristretto255, mod } = await noble();
   const pk = privateKeyHex.trim().toLowerCase().replace(/^0x/, "");
   if (!/^[0-9a-f]{64}$/.test(pk)) throw new Error("Invalid private key hex");
   const privBytes = hexToBytes(pk);
@@ -152,7 +174,11 @@ export function derivePubkey32FromPrivateKeyHex(privateKeyHex: string): Uint8Arr
   return ristretto255.Point.BASE.multiply(x).toBytes();
 }
 
-function schnorrSign(privKeyHex: string, message: Uint8Array): Uint8Array {
+async function schnorrSign(
+  privKeyHex: string,
+  message: Uint8Array,
+): Promise<Uint8Array> {
+  const { ristretto255, mod, blake2b } = await noble();
   const pk = privKeyHex.trim().toLowerCase().replace(/^0x/, "");
   if (!/^[0-9a-f]{64}$/.test(pk)) throw new Error("Invalid private key hex");
   const xBytes = hexToBytes(pk);
@@ -163,7 +189,7 @@ function schnorrSign(privKeyHex: string, message: Uint8Array): Uint8Array {
   const k = mod(bytesToNumberLE(kBytes), ristretto255.Point.Fn.ORDER);
   const R = ristretto255.Point.BASE.multiply(k).toBytes();
 
-  const eBytes = blake2b256(concatBytes([R, P, message]));
+  const eBytes = blake2b(concatBytes([R, P, message]), { dkLen: 64 }).slice(0, 32);
   const e = mod(bytesToNumberLE(eBytes), ristretto255.Point.Fn.ORDER);
 
   const s = mod(k + e * x, ristretto255.Point.Fn.ORDER);
@@ -175,7 +201,7 @@ function schnorrSign(privKeyHex: string, message: Uint8Array): Uint8Array {
   return sig;
 }
 
-export function buildSignedTransferTxV1(params: {
+export async function buildSignedTransferTxV1(params: {
   faucetPrivateKeyHex: string;
   faucetPubkey32: Uint8Array;
   to: CatalystAddress;
@@ -185,7 +211,8 @@ export function buildSignedTransferTxV1(params: {
   chainId: bigint;
   genesisHashHex: string; // 0x + 32 bytes
   nowMs: number;
-}): { wireHex: string; txIdHex: string } {
+}): Promise<{ wireHex: string; txIdHex: string }> {
+  const { blake2b } = await noble();
   const toAddr = normalizeCatalystAddress(params.to);
   const toPk = hexToBytes(toAddr);
   const faucetPk = params.faucetPubkey32;
@@ -228,7 +255,7 @@ export function buildSignedTransferTxV1(params: {
     u64le(timestamp),
   ]);
 
-  const signature = schnorrSign(params.faucetPrivateKeyHex, signingPayload);
+  const signature = await schnorrSign(params.faucetPrivateKeyHex, signingPayload);
 
   const tx: Tx = { core, signature, timestamp };
   const body = serializeTx(tx);
