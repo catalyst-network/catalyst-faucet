@@ -98,7 +98,10 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     datasources: { db: { url: config.databaseUrl } },
   });
 
-  const provider = new ethers.JsonRpcProvider(config.rpcUrl, config.chainId);
+  const network = new ethers.Network("catalyst-testnet", config.chainId);
+  const provider = new ethers.JsonRpcProvider(config.rpcUrl, network, {
+    staticNetwork: network,
+  });
   const wallet = new ethers.Wallet(config.faucetPrivateKey, provider);
 
   const verifyTurnstile = createTurnstileVerifier(config.turnstileSecretKey);
@@ -118,15 +121,37 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
 
   app.get("/health", async (req, reply) => {
     const start = Date.now();
-    const [redisOk, dbOk, rpcBlockOk, rpcNetOk] = await Promise.allSettled([
+    async function fetchRpcChainId(): Promise<number | null> {
+      // Prefer eth_chainId, but fall back to net_version for nodes that don't implement it.
+      try {
+        const res = await provider.send("eth_chainId", []);
+        if (typeof res === "string" && res.toLowerCase().startsWith("0x")) {
+          const n = Number.parseInt(res.slice(2), 16);
+          if (Number.isFinite(n)) return n;
+        }
+      } catch {
+        // fall through
+      }
+      try {
+        const res = await provider.send("net_version", []);
+        const s = typeof res === "string" ? res : typeof res === "number" ? String(res) : "";
+        const n = Number.parseInt(s, 10);
+        if (Number.isFinite(n)) return n;
+      } catch {
+        // fall through
+      }
+      return null;
+    }
+
+    const [redisOk, dbOk, rpcBlockOk, rpcChainOk] = await Promise.allSettled([
       redis.ping(),
       prisma.$queryRaw`SELECT 1`,
       provider.getBlockNumber(),
-      provider.getNetwork(),
+      fetchRpcChainId(),
     ]);
 
     const rpcNetworkMatches =
-      rpcNetOk.status === "fulfilled" ? Number(rpcNetOk.value.chainId) === config.chainId : false;
+      rpcChainOk.status === "fulfilled" ? (rpcChainOk.value ?? -1) === config.chainId : false;
 
     const rpcOk = rpcBlockOk.status === "fulfilled" && rpcNetworkMatches;
     const ok = redisOk.status === "fulfilled" && dbOk.status === "fulfilled" && rpcOk;
