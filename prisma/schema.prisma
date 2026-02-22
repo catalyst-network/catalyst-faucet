@@ -1,0 +1,25 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Claim {
+  id        String   @id @default(cuid())
+  address   String
+  ipHash    String   @map("ip_hash")
+  amountWei BigInt   @map("amount_wei")
+  txHash    String   @unique @map("tx_hash")
+  country   String?  @db.VarChar(2)
+  asn       Int?
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([address, createdAt])
+  @@index([ipHash, createdAt])
+  @@index([createdAt])
+}
+
