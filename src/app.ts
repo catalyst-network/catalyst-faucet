@@ -76,6 +76,22 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       });
     }
 
+    // Fastify content-type / JSON body parse errors (keep user-facing message clear)
+    const errCode = (err as any)?.code as string | undefined;
+    if (
+      errCode === "FST_ERR_CTP_INVALID_MEDIA_TYPE" ||
+      errCode === "FST_ERR_CTP_EMPTY_JSON_BODY" ||
+      errCode === "FST_ERR_CTP_INVALID_JSON_BODY"
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Invalid JSON request body",
+          details: { hint: "Send Content-Type: application/json with a JSON object body." },
+        },
+      });
+    }
+
     if ((err as any).validation) {
       return reply.code(400).send({
         error: { code: "INVALID_REQUEST", message: "Invalid address/body" },
@@ -268,7 +284,12 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
   app.post("/v1/request", async (req) => {
     const body = req.body as unknown;
     if (!body || typeof body !== "object") {
-      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+      throw apiError({
+        statusCode: 400,
+        code: "INVALID_REQUEST",
+        message: "Expected a JSON object body",
+        details: { hint: 'POST JSON like {"address":"0x...","turnstileToken":"..."}' },
+      });
     }
     const rec = body as Record<string, unknown>;
     const address = typeof rec.address === "string" ? rec.address : undefined;
@@ -281,8 +302,18 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       throw apiError({
         statusCode: 400,
         code: "INVALID_REQUEST",
-        message: "Invalid address/body",
-        details: { required: ["address", "turnstileToken"], acceptedTokenFields: ["turnstileToken", "cfTurnstileResponse", "captchaToken"] },
+        message: "Missing required fields",
+        details: {
+          required: ["address", "turnstileToken"],
+          acceptedTokenFields: ["turnstileToken", "cfTurnstileResponse", "captchaToken"],
+          receivedKeys: Object.keys(rec).sort(),
+          receivedTypes: {
+            address: typeof rec.address,
+            turnstileToken: typeof rec.turnstileToken,
+            cfTurnstileResponse: typeof rec.cfTurnstileResponse,
+            captchaToken: typeof rec.captchaToken,
+          },
+        },
       });
     }
 
@@ -300,7 +331,12 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
   app.post("/v1/claim", async (req) => {
     const body = req.body as unknown;
     if (!body || typeof body !== "object") {
-      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+      throw apiError({
+        statusCode: 400,
+        code: "INVALID_REQUEST",
+        message: "Expected a JSON object body",
+        details: { hint: 'POST JSON like {"address":"0x...","turnstileToken":"..."}' },
+      });
     }
     const rec = body as Record<string, unknown>;
     const address = typeof rec.address === "string" ? rec.address : undefined;
@@ -313,8 +349,18 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       throw apiError({
         statusCode: 400,
         code: "INVALID_REQUEST",
-        message: "Invalid address/body",
-        details: { required: ["address", "turnstileToken"], acceptedTokenFields: ["turnstileToken", "cfTurnstileResponse", "captchaToken"] },
+        message: "Missing required fields",
+        details: {
+          required: ["address", "turnstileToken"],
+          acceptedTokenFields: ["turnstileToken", "cfTurnstileResponse", "captchaToken"],
+          receivedKeys: Object.keys(rec).sort(),
+          receivedTypes: {
+            address: typeof rec.address,
+            turnstileToken: typeof rec.turnstileToken,
+            cfTurnstileResponse: typeof rec.cfTurnstileResponse,
+            captchaToken: typeof rec.captchaToken,
+          },
+        },
       });
     }
 
