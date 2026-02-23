@@ -270,14 +270,25 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     if (!body || typeof body !== "object") {
       throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
     }
-    const { address, turnstileToken } = body as { address?: unknown; turnstileToken?: unknown };
-    if (typeof address !== "string" || typeof turnstileToken !== "string") {
-      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+    const rec = body as Record<string, unknown>;
+    const address = typeof rec.address === "string" ? rec.address : undefined;
+    const token =
+      (typeof rec.turnstileToken === "string" && rec.turnstileToken) ||
+      (typeof rec.cfTurnstileResponse === "string" && rec.cfTurnstileResponse) ||
+      (typeof rec.captchaToken === "string" && rec.captchaToken) ||
+      undefined;
+    if (typeof address !== "string" || typeof token !== "string") {
+      throw apiError({
+        statusCode: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid address/body",
+        details: { required: ["address", "turnstileToken"], acceptedTokenFields: ["turnstileToken", "cfTurnstileResponse", "captchaToken"] },
+      });
     }
 
     const res = await performRequest({
       address,
-      turnstileToken,
+      turnstileToken: token,
       ip: req.ip,
       headers: req.headers as unknown as Record<string, unknown>,
     });
@@ -291,14 +302,20 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     if (!body || typeof body !== "object") {
       throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
     }
-    const { address, captchaToken, turnstileToken } = body as {
-      address?: unknown;
-      captchaToken?: unknown;
-      turnstileToken?: unknown;
-    };
-    const token = (typeof turnstileToken === "string" && turnstileToken) || (typeof captchaToken === "string" && captchaToken);
+    const rec = body as Record<string, unknown>;
+    const address = typeof rec.address === "string" ? rec.address : undefined;
+    const token =
+      (typeof rec.turnstileToken === "string" && rec.turnstileToken) ||
+      (typeof rec.cfTurnstileResponse === "string" && rec.cfTurnstileResponse) ||
+      (typeof rec.captchaToken === "string" && rec.captchaToken) ||
+      undefined;
     if (typeof address !== "string" || typeof token !== "string") {
-      throw apiError({ statusCode: 400, code: "INVALID_REQUEST", message: "Invalid address/body" });
+      throw apiError({
+        statusCode: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid address/body",
+        details: { required: ["address", "turnstileToken"], acceptedTokenFields: ["turnstileToken", "cfTurnstileResponse", "captchaToken"] },
+      });
     }
 
     const res = await performRequest({
