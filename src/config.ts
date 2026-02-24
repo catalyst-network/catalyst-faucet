@@ -5,6 +5,20 @@ function isHex32(s: string): boolean {
 
 const ALLOWED_CHAIN_IDS = new Set<number>([0xbf8457c]);
 
+function envBool(defaultValue: boolean) {
+  return z.preprocess((v) => {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v === "boolean") return v;
+    if (typeof v === "number") return v !== 0;
+    if (typeof v !== "string") return v;
+    const s = v.trim().toLowerCase();
+    if (s === "") return undefined;
+    if (["1", "true", "t", "yes", "y", "on"].includes(s)) return true;
+    if (["0", "false", "f", "no", "n", "off"].includes(s)) return false;
+    return v;
+  }, z.boolean().default(defaultValue));
+}
+
 function parseChainId(input: string): number {
   const s = input.trim().toLowerCase();
   const n = s.startsWith("0x") ? Number.parseInt(s.slice(2), 16) : Number.parseInt(s, 10);
@@ -30,8 +44,8 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8080),
   HOST: z.string().default("0.0.0.0"),
   GLOBAL_RPM: z.coerce.number().int().positive().default(60),
-  ENABLE_COUNTRY_LIMIT: z.coerce.boolean().default(false),
-  ENABLE_ASN_LIMIT: z.coerce.boolean().default(false),
+  ENABLE_COUNTRY_LIMIT: envBool(false),
+  ENABLE_ASN_LIMIT: envBool(false),
 });
 
 export type AppConfig = Readonly<{
