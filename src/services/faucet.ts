@@ -1,7 +1,7 @@
 import { apiError } from "../errors";
 import { createCatalystRpcClient } from "./catalystRpc";
 import {
-  buildSignedTransferTxV1,
+  buildSignedTransferTxV2,
   derivePubkey32FromPrivateKeyHex,
   normalizeCatalystAddress,
 } from "./catalystTx";
@@ -75,7 +75,7 @@ export function createFaucetSender(opts: {
       });
       const fees = BigInt(feeStr);
 
-      const { wireHex, txIdHex } = await buildSignedTransferTxV1({
+      const { wireHex, txIdHex } = await buildSignedTransferTxV2({
         faucetPrivateKeyHex: opts.faucetPrivateKeyHex,
         faucetPubkey32: faucetPk,
         to: recipient,

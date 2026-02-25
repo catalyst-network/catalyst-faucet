@@ -24,6 +24,8 @@ async function noble(): Promise<Noble> {
 
 const TX_WIRE_MAGIC_V1 = new TextEncoder().encode("CTX1");
 const TX_SIG_DOMAIN_V1 = new TextEncoder().encode("CATALYST_SIG_V1");
+const TX_WIRE_MAGIC_V2 = new TextEncoder().encode("CTX2");
+const TX_SIG_DOMAIN_V2 = new TextEncoder().encode("CATALYST_SIG_V2");
 
 export type CatalystAddress = `0x${string}`;
 
@@ -57,11 +59,6 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-function blake2b256(data: Uint8Array): Uint8Array {
-  // Only used from async code paths that loaded noble.
-  throw new Error("blake2b256 called before noble loaded");
 }
 
 function concatBytes(parts: Uint8Array[]): Uint8Array {
@@ -119,6 +116,16 @@ type Tx = {
   timestamp: bigint;
 };
 
+type SignatureScheme = 0; // Schnorr
+type OptBytes = { kind: "none" } | { kind: "some"; value: Uint8Array };
+type TxV2 = {
+  core: TxCore;
+  signatureScheme: SignatureScheme;
+  signature: Uint8Array; // Vec<u8> in encoding, must be 64 bytes for Schnorr
+  senderPubkey: OptBytes; // must be None for now
+  timestamp: bigint; // ms since epoch
+};
+
 function serializeVec(items: Uint8Array[]): Uint8Array {
   return concatBytes([u32le(items.length), ...items]);
 }
@@ -159,6 +166,24 @@ function serializeTx(tx: Tx): Uint8Array {
   return concatBytes([
     serializeTxCore(tx.core),
     serializeBytesVec(tx.signature),
+    u64le(tx.timestamp),
+  ]);
+}
+
+function serializeOptionBytes(o: OptBytes): Uint8Array {
+  if (o.kind === "none") return u8(0);
+  return concatBytes([u8(1), serializeBytesVec(o.value)]);
+}
+
+function serializeTxV2(tx: TxV2): Uint8Array {
+  if (tx.signatureScheme !== 0) throw new Error("Unsupported signature scheme");
+  if (tx.signature.length !== 64) throw new Error("Signature must be 64 bytes");
+  if (tx.senderPubkey.kind !== "none") throw new Error("sender_pubkey must be None");
+  return concatBytes([
+    serializeTxCore(tx.core),
+    u8(tx.signatureScheme),
+    serializeBytesVec(tx.signature),
+    serializeOptionBytes(tx.senderPubkey),
     u64le(tx.timestamp),
   ]);
 }
@@ -263,6 +288,80 @@ export async function buildSignedTransferTxV1(params: {
 
   // tx_id = blake2b512(wire)[..32]
   const txId = blake2b(wire, { dkLen: 64 }).slice(0, 32);
+
+  return {
+    wireHex: `0x${bytesToHex(wire)}`,
+    txIdHex: `0x${bytesToHex(txId)}`,
+  };
+}
+
+export async function buildSignedTransferTxV2(params: {
+  faucetPrivateKeyHex: string;
+  faucetPubkey32: Uint8Array;
+  to: CatalystAddress;
+  amount: bigint;
+  nonce: bigint;
+  fees: bigint;
+  chainId: bigint;
+  genesisHashHex: string; // 0x + 32 bytes
+  nowMs: number;
+}): Promise<{ wireHex: string; txIdHex: string }> {
+  const { blake2b } = await noble();
+  const toAddr = normalizeCatalystAddress(params.to);
+  const toPk = hexToBytes(toAddr);
+  const faucetPk = params.faucetPubkey32;
+  if (faucetPk.length !== 32) throw new Error("Invalid faucet pubkey32");
+  if (toPk.length !== 32) throw new Error("Invalid recipient pubkey32");
+
+  const amountI64 = BigInt(params.amount);
+  if (amountI64 <= 0n) throw new Error("Amount must be > 0");
+  const I64_MAX = (1n << 63n) - 1n;
+  if (amountI64 > I64_MAX) throw new Error("Amount too large for i64");
+  if (params.fees < 0n) throw new Error("Fees must be >= 0");
+  const U64_MAX = (1n << 64n) - 1n;
+  if (params.fees > U64_MAX) throw new Error("Fees too large for u64");
+
+  const core: TxCore = {
+    txType: 0,
+    entries: [
+      { publicKey32: faucetPk, amount: { kind: "nonconfidential", value: -amountI64 } },
+      { publicKey32: toPk, amount: { kind: "nonconfidential", value: amountI64 } },
+    ],
+    nonce: params.nonce,
+    lockTime: 0, // recommended (avoid clock-skew failures)
+    fees: params.fees,
+    data: new Uint8Array(),
+  };
+
+  const signatureScheme: SignatureScheme = 0;
+  const senderPubkey: OptBytes = { kind: "none" };
+  const timestamp = BigInt(params.nowMs);
+
+  const genesisHash = params.genesisHashHex.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{64}$/.test(genesisHash)) throw new Error("Invalid genesis hash hex");
+  const genesisHashBytes = hexToBytes(genesisHash);
+
+  // Signing payload v2:
+  // "CATALYST_SIG_V2" || chain_id(u64le) || genesis_hash(32) || signature_scheme(u8) ||
+  // sender_pubkey(None => 0x00) || core_bytes || timestamp(u64le)
+  const signingPayload = concatBytes([
+    TX_SIG_DOMAIN_V2,
+    u64le(params.chainId),
+    genesisHashBytes,
+    u8(signatureScheme),
+    serializeOptionBytes(senderPubkey),
+    serializeTxCore(core),
+    u64le(timestamp),
+  ]);
+
+  const signature = await schnorrSign(params.faucetPrivateKeyHex, signingPayload);
+
+  const tx: TxV2 = { core, signatureScheme, signature, senderPubkey, timestamp };
+  const txBytes = serializeTxV2(tx);
+  const wire = concatBytes([TX_WIRE_MAGIC_V2, txBytes]);
+
+  // tx_id = blake2b512("CTX2" || tx_bytes)[..32]
+  const txId = blake2b(concatBytes([TX_WIRE_MAGIC_V2, txBytes]), { dkLen: 64 }).slice(0, 32);
 
   return {
     wireHex: `0x${bytesToHex(wire)}`,
